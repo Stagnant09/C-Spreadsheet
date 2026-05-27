@@ -3,18 +3,18 @@
 #include "Cell.h"
 #include "Functions.h"
 
-int cell_create(Matrix* matrix, Cell* cell, const int x, const int y, const CellContent content, const short type) {
+int cell_create(Matrix* matrix, const int x, const int y, const CellContent content, const short type) {
     if (x < 0 || y < 0) {
         return -1;
     }
-    if (x >= matrix->rows || y >= matrix->cols) {
-        expand(matrix, x + 1, y + 1);
+    if (x >= matrix->cols || y >= matrix->rows) {
+        expand(matrix, y + 1, x + 1);
     }
+    Cell* cell = &matrix->cells[y][x];
     cell->x = x;
     cell->y = y;
     cell->content = content;
     cell->type = type;
-    matrix->cells[x][y] = *cell;
     return 0;
 }
 
@@ -120,6 +120,11 @@ int add(const Cell* cell1, const Cell* cell2, Cell* result) {
     }
 }
 
+/**
+ * Print a cell in a "(x, y) value" format
+ * @param cell The cell to print
+ * @return 0 on success, -1 on failure
+ */
 int print(const Cell* cell) {
     switch (cell->type) {
         case 0:
@@ -150,7 +155,7 @@ int add_row(Cell** cells, const Cell* cell1, const Cell* cell2, Cell* result) {
     }
     const int row = cell1->y;
     for (int j = cell1->x; j <= cell2->x; j++) {
-        add(&cells[j][row], result, result);
+        add(&cells[row][j], result, result);
     }
     return 0;
 }
@@ -163,7 +168,7 @@ int add_col(Cell** cells, const Cell* cell1, const Cell* cell2, Cell* result) {
     }
     const int col = cell1->x;
     for (int i = cell1->y; i <= cell2->y; i++) {
-        add(&cells[col][i], result, result);
+        add(&cells[i][col], result, result);
     }
     return 0;
 }
@@ -192,4 +197,58 @@ void expand(Matrix* matrix, int rows, int cols) {
     matrix->cells = new_cells;
     matrix->rows = new_rows;
     matrix->cols = new_cols;
+}
+
+int print_matrix(const Matrix* matrix) {
+    if (matrix == NULL || matrix->cells == NULL) {
+        return -1;
+    }
+
+    // Print top border
+    printf(" ");
+    for (int j = 0; j < matrix->cols; j++) {
+        printf("------------ ");
+    }
+    printf("\n");
+
+    for (int i = 0; i < matrix->rows; i++) {
+        // Print cell content row
+        printf("|");
+        for (int j = 0; j < matrix->cols; j++) {
+            Cell* cell = &matrix->cells[i][j];
+            char buffer[12];
+            buffer[0] = '\0';
+
+            switch (cell->type) {
+                case 1:
+                    snprintf(buffer, sizeof(buffer), "%d", cell->content.value);
+                    break;
+                case 2:
+                    snprintf(buffer, sizeof(buffer), "%.2f", cell->content.fvalue);
+                    break;
+                case 3:
+                    snprintf(buffer, sizeof(buffer), "%.2lf", cell->content.dvalue);
+                    break;
+                case 4:
+                    if (cell->content.string) {
+                        snprintf(buffer, sizeof(buffer), "%s", cell->content.string);
+                    }
+                    break;
+                default:
+                    // Empty cell
+                    break;
+            }
+            printf(" %-10s |", buffer);
+        }
+        printf("\n");
+
+        // Print bottom border for each row
+        printf("|");
+        for (int j = 0; j < matrix->cols; j++) {
+            printf("____________|");
+        }
+        printf("\n");
+    }
+
+    return 0;
 }

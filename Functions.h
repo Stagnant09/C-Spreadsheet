@@ -3,7 +3,7 @@
 #include "Cell.h"
 
 // Initialization and modification
-int cell_create(Matrix* matrix, Cell* cell, const int x, const int y, const CellContent content, const short type);
+int cell_create(Matrix* matrix, const int x, const int y, const CellContent content, const short type);
 int cell_destroy(Matrix* matrix, Cell* cell);
 int cell_set_content(Cell* cell, const CellContent content);
 int cell_get_content(const Cell* cell, CellContent* content);
@@ -30,6 +30,7 @@ int powc(Cell* cell1, Cell* cell2, Cell* result);
 
 // I/O
 int print(const Cell* cell);
+int print_matrix(const Matrix* matrix);
 
 // Aggregate operations
 int add_row(Cell** cells, const Cell* cell1, const Cell* cell2, Cell* result);
