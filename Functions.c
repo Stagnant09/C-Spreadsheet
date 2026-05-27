@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
 #include "Cell.h"
 #include "Functions.h"
 
@@ -92,32 +93,167 @@ int init(Matrix *matrix, const int rows, const int cols) {
 int add(const Cell* cell1, const Cell* cell2, Cell* result) {
     if (cell1->type != cell2->type) {
         return -1; // Types do not match
-    } else {
-        CellContent cc;
-        switch (cell1->type) {
-            case 0:
-                return -1; // No type set
-                break;
-            case 1:
-                cc.value = cell1->content.value + cell2->content.value;
-                result->content.value = cc.value;
-                break;
-            case 2:
-                cc.fvalue = cell2->content.fvalue + cell1->content.fvalue;
-                result->content.fvalue = cc.fvalue;
-                break;
-            case 3:
-                cc.dvalue = cell1->content.dvalue + cell2->content.dvalue;
-                result->content.dvalue = cc.dvalue;
-                break;
-            case 4:
-                return -1; // Not implemented
-                break;
-            default:
-                return -1;
-        }
-        return 0;
     }
+    CellContent cc;
+    switch (cell1->type) {
+        case 0:
+            return -1; // No type set
+            break;
+        case 1:
+            cc.value = cell1->content.value + cell2->content.value;
+            result->content.value = cc.value;
+            break;
+        case 2:
+            cc.fvalue = cell2->content.fvalue + cell1->content.fvalue;
+            result->content.fvalue = cc.fvalue;
+            break;
+        case 3:
+            cc.dvalue = cell1->content.dvalue + cell2->content.dvalue;
+            result->content.dvalue = cc.dvalue;
+            break;
+        case 4:
+            return -1; // Not implemented
+            break;
+        default:
+            return -1;
+    }
+    return 0;
+}
+
+int sub(const Cell* cell1, const Cell* cell2, Cell* result) {
+    if (cell1->type != cell2->type) {
+        return -1;
+    }
+    CellContent cc;
+    switch (cell1->type) {
+        case 0:
+            return -1; // No type set
+            break;
+        case 1:
+            cc.value = cell1->content.value - cell2->content.value;
+            result->content.value = cc.value;
+            break;
+        case 2:
+            cc.fvalue = cell1->content.fvalue - cell2->content.fvalue;
+            result->content.fvalue = cc.fvalue;
+            break;
+        case 3:
+            cc.dvalue = cell1->content.dvalue - cell2->content.dvalue;
+            result->content.dvalue = cc.dvalue;
+            break;
+        case 4:
+            return -1; // Not implemented
+            break;
+        default:
+            return -1;
+    }
+    return 0;
+}
+
+int mul(const Cell* cell1, const Cell* cell2, Cell* result) {
+    if (cell1->type != cell2->type) {
+        return -1;
+    }
+    CellContent cc;
+    switch (cell1->type) {
+        case 0:
+            return -1;
+            break;
+        case 1:
+            cc.value = cell1->content.value * cell2->content.value;
+            result->content.value = cc.value;
+            break;
+        case 2:
+            cc.fvalue = cell1->content.fvalue * cell2->content.fvalue;
+            result->content.fvalue = cc.fvalue;
+            break;
+        case 3:
+            cc.dvalue = cell1->content.dvalue * cell2->content.dvalue;
+            result->content.dvalue = cc.dvalue;
+            break;
+        case 4:
+            return -1;
+            break;
+        default:
+            return -1;
+    }
+    return 0;
+}
+
+int divc(const Cell* cell1, const Cell* cell2, Cell* result) {
+    if (cell1->type != cell2->type) {
+        return -1;
+    }
+    CellContent cc;
+    switch (cell1->type) {
+        case 0:
+            return -1;
+            break;
+        case 1:
+            if (cell2->content.value == 0) return -1;
+            cc.dvalue = (double)cell1->content.value / (double)cell2->content.value;
+            result->content.dvalue = cc.dvalue;
+            result->type = 3;
+            break;
+        case 2:
+            if (cell2->content.fvalue == 0.0f) return -1;
+            cc.fvalue = cell1->content.fvalue / cell2->content.fvalue;
+            result->content.fvalue = cc.fvalue;
+            break;
+        case 3:
+            if (cell2->content.dvalue == 0.0) return -1;
+            cc.dvalue = cell1->content.dvalue / cell2->content.dvalue;
+            result->content.dvalue = cc.dvalue;
+            break;
+        case 4:
+            return -1;
+            break;
+        default:
+            return -1;
+    }
+    return 0;
+}
+
+int mod(const Cell* cell1, const Cell* cell2, Cell* result) {
+    if (cell1->type != cell2->type) {
+        return -1;
+    }
+    CellContent cc;
+    switch (cell1->type) {
+        case 1:
+            if (cell2->content.value == 0) return -1;
+            cc.value = cell1->content.value % cell2->content.value;
+            result->content.value = cc.value;
+            break;
+        default:
+            return -1; // Only integers for modulo
+    }
+    return 0;
+}
+
+
+int powc(const Cell* cell1, const Cell* cell2, Cell* result) {
+    if (cell1->type != cell2->type) {
+        return -1;
+    }
+    CellContent cc;
+    switch (cell1->type) {
+        case 1:
+            cc.value = (int)pow(cell1->content.value, cell2->content.value);
+            result->content.value = cc.value;
+            break;
+        case 2:
+            cc.fvalue = powf(cell1->content.fvalue, cell2->content.fvalue);
+            result->content.fvalue = cc.fvalue;
+            break;
+        case 3:
+            cc.dvalue = pow(cell1->content.dvalue, cell2->content.dvalue);
+            result->content.dvalue = cc.dvalue;
+            break;
+        default:
+            return -1;
+    }
+    return 0;
 }
 
 /**
@@ -171,6 +307,34 @@ int add_col(Cell** cells, const Cell* cell1, const Cell* cell2, Cell* result) {
         add(&cells[i][col], result, result);
     }
     return 0;
+}
+
+int avg_row(Cell** cells, const Cell* cell1, const Cell* cell2, Cell* result) {
+    if (add_row(cells, cell1, cell2, result) != 0) return -1;
+    int count = cell2->x - cell1->x + 1;
+    if (count <= 0) return -1;
+    Cell divisor = *result;
+    switch (result->type) {
+        case 1: divisor.content.value = count; break;
+        case 2: divisor.content.fvalue = (float)count; break;
+        case 3: divisor.content.dvalue = (double)count; break;
+        default: return -1;
+    }
+    return divc(result, &divisor, result);
+}
+
+int avg_col(Cell** cells, const Cell* cell1, const Cell* cell2, Cell* result) {
+    if (add_col(cells, cell1, cell2, result) != 0) return -1;
+    int count = cell2->y - cell1->y + 1;
+    if (count <= 0) return -1;
+    Cell divisor = *result;
+    switch (result->type) {
+        case 1: divisor.content.value = count; break;
+        case 2: divisor.content.fvalue = (float)count; break;
+        case 3: divisor.content.dvalue = (double)count; break;
+        default: return -1;
+    }
+    return divc(result, &divisor, result);
 }
 
 void expand(Matrix* matrix, int rows, int cols) {

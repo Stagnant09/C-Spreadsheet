@@ -1,24 +1,27 @@
 #include <stdio.h>
+#include <string.h>
 #include "Cell.h"
 #include "Functions.h"
+#include "Parser.h"
 
 int main(void) {
     Matrix matrix;
     init(&matrix, 6, 6);
-    cell_create(&matrix, 0, 0, (CellContent){5}, 1);
-    cell_create(&matrix, 1, 0, (CellContent){5}, 1);
-    cell_create(&matrix, 2, 0, (CellContent){2}, 1);
-    cell_create(&matrix, 3, 0, (CellContent){0}, 1);
 
-    add(&matrix.cells[0][0], &matrix.cells[0][1], &matrix.cells[0][3]);
-    print(&matrix.cells[0][3]);
-    printf("\n");
+    char buffer[256];
+    printf("Commands: A0 = 5, A3 = ADD(A0:A2), exit\n");
 
-    add_row(matrix.cells, &matrix.cells[0][0], &matrix.cells[0][2], &matrix.cells[0][3]);
-    print(&matrix.cells[0][3]);
-    printf("\n");
+    while (1) {
+        printf("> ");
+        if (fgets(buffer, sizeof(buffer), stdin) == NULL) break;
+        buffer[strcspn(buffer, "\n")] = '\0';
 
-    print_matrix(&matrix);
+        if (strcmp(buffer, "exit") == 0) break;
+        if (strlen(buffer) == 0) continue;
+
+        process_command(&matrix, buffer);
+        print_matrix(&matrix);
+    }
 
     return 0;
 }

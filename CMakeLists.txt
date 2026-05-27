@@ -6,4 +6,10 @@ set(CMAKE_C_STANDARD 11)
 add_executable(txtbsdsp main.c
         Cell.h
         Functions.h
-        Functions.c)
+        Functions.c
+        Parser.h
+        Parser.c)
+
+if(UNIX)
+    target_link_libraries(txtbsdsp m)
+endif()

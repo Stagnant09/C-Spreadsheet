@@ -22,11 +22,11 @@ int cell_get_type(const Cell* cell, short* type);
 
 // Mathematical operations
 int add(const Cell* cell1, const Cell* cell2, Cell* result);
-int sub(Cell* cell1, Cell* cell2, Cell* result);
-int mul(Cell* cell1, Cell* cell2, Cell* result);
-int divc(Cell* cell1, Cell* cell2, Cell* result);
-int mod(Cell* cell1, Cell* cell2, Cell* result);
-int powc(Cell* cell1, Cell* cell2, Cell* result);
+int sub(const Cell* cell1, const Cell* cell2, Cell* result);
+int mul(const Cell* cell1, const Cell* cell2, Cell* result);
+int divc(const Cell* cell1, const Cell* cell2, Cell* result);
+int mod(const Cell* cell1, const Cell* cell2, Cell* result);
+int powc(const Cell* cell1, const Cell* cell2, Cell* result);
 
 // I/O
 int print(const Cell* cell);
