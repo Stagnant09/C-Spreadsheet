@@ -8,7 +8,9 @@ add_executable(txtbsdsp main.c
         Functions.h
         Functions.c
         Parser.h
-        Parser.c)
+        Parser.c
+        utils.h
+        utils.c)
 
 if(UNIX)
     target_link_libraries(txtbsdsp m)
