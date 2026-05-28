@@ -1,5 +1,3 @@
-# txtbsdsp
-
 A terminal-based spreadsheet editor written in C11. Cells are addressed by column letter and row number (e.g. `A0`, `B3`). Expressions are evaluated by a recursive-descent parser that supports multi-operand arithmetic, parenthesised sub-expressions, operator precedence, aggregate range functions, and per-cell map functions. On x86-64 the inner accumulation loops use inline SSE2 assembly.
 
 ---
