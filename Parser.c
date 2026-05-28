@@ -1,3 +1,28 @@
+/*
+ * Parser.c  –  Recursive-descent expression evaluator
+ *
+ * Supported command syntax
+ * ─────────────────────────────────────────────────────────────────────
+ *  Assignment     A2 = <expr>
+ *  Expression     <expr>  ::=  <term>  { ('+' | '-') <term> }
+ *  Term           <term>  ::=  <power> { ('*' | '/') <power> }
+ *  Power          <power> ::=  <unary> { '^' <unary> }       (right-assoc)
+ *  Unary          <unary> ::=  '-' <unary> | <primary>
+ *  Primary        <primary> ::= '(' <expr> ')'
+ *                             | FUNC1( <primary> )
+ *                             | AGGFUNC( <range> )            e.g. ADD(A0:A4)
+ *                             | AGGFUNC( <cell1>, <cell2> )   e.g. SUB(A0,B0)
+ *                             | <cell-ref>                    e.g. A3
+ *                             | <number>
+ *
+ *  Examples:
+ *    A2 = A1 + A0 + 4
+ *    A3 = (A2 + A1) / 2 + A5
+ *    A4 = A0 * A1 - A2 * 3 + (A3 ^ 2)
+ *    A5 = SUM(A0:A4)
+ *    A6 = SQRT(A2)
+ */
+
 #include "Parser.h"
 #include "Functions.h"
 #include "utils.h"
@@ -5,190 +30,458 @@
 #include <string.h>
 #include <ctype.h>
 #include <stdlib.h>
+#include <math.h>
 
-static int parse_cell_name(const char* name, int* x, int* y) {
-    if (!name || !isalpha(name[0])) return -1;
-    *x = toupper(name[0]) - 'A';
-    *y = atoi(name + 1);
-    return 0;
+static inline double _cell_val(const Cell* c) {
+    switch (c->type) {
+        case 1: return (double)c->content.value;
+        case 2: return (double)c->content.fvalue;
+        case 3: return c->content.dvalue;
+        default: return 0.0;
+    }
 }
 
-static double get_value(Matrix* matrix, char* str, short* type) {
-    char* s = str;
-    while(isspace(*s)) s++;
-    char* end = s + strlen(s) - 1;
-    while(end > s && isspace(*end)) *end-- = '\0';
+/* ───────────────────────────── token stream ───────────────────────────── */
 
-    int x, y;
-    if (parse_cell_name(s, &x, &y) == 0) {
-        // Expand if needed
-        cell_create(matrix, x, y, matrix->cells[y][x].content, matrix->cells[y][x].type);
-        Cell* cell = &matrix->cells[y][x];
-        *type = cell->type;
-        if (cell->type == 1) return (double)cell->content.value;
-        if (cell->type == 2) return (double)cell->content.fvalue;
-        if (cell->type == 3) return cell->content.dvalue;
+typedef enum {
+    TOK_EOF, TOK_NUM, TOK_CELL, TOK_IDENT,
+    TOK_PLUS, TOK_MINUS, TOK_STAR, TOK_SLASH, TOK_CARET,
+    TOK_LPAREN, TOK_RPAREN, TOK_COLON, TOK_COMMA
+} TokKind;
+
+typedef struct {
+    TokKind kind;
+    double  num;          /* TOK_NUM  */
+    char    ident[32];    /* TOK_IDENT | TOK_CELL */
+    int     cx, cy;       /* TOK_CELL  */
+} Token;
+
+typedef struct {
+    const char* src;
+    int         pos;
+    Token       cur;
+    Matrix*     matrix;
+    int         error;    /* set on any parse/eval error */
+} Parser;
+
+/* ─── lexer ─────────────────────────────────────────────────────────────── */
+
+static void skip_ws(Parser* p) {
+    while (p->src[p->pos] && isspace((unsigned char)p->src[p->pos]))
+        p->pos++;
+}
+
+static void next_token(Parser* p) {
+    skip_ws(p);
+    char c = p->src[p->pos];
+
+    if (c == '\0') { p->cur.kind = TOK_EOF; return; }
+
+    switch (c) {
+        case '+': p->cur.kind = TOK_PLUS;   p->pos++; return;
+        case '-': p->cur.kind = TOK_MINUS;  p->pos++; return;
+        case '*': p->cur.kind = TOK_STAR;   p->pos++; return;
+        case '/': p->cur.kind = TOK_SLASH;  p->pos++; return;
+        case '^': p->cur.kind = TOK_CARET;  p->pos++; return;
+        case '(': p->cur.kind = TOK_LPAREN; p->pos++; return;
+        case ')': p->cur.kind = TOK_RPAREN; p->pos++; return;
+        case ':': p->cur.kind = TOK_COLON;  p->pos++; return;
+        case ',': p->cur.kind = TOK_COMMA;  p->pos++; return;
+    }
+
+    /* Number (int or float) */
+    if (isdigit((unsigned char)c) || (c == '.' && isdigit((unsigned char)p->src[p->pos+1]))) {
+        char* end;
+        p->cur.num  = strtod(p->src + p->pos, &end);
+        p->cur.kind = TOK_NUM;
+        p->pos = (int)(end - p->src);
+        return;
+    }
+
+    /* Identifier or cell reference  e.g.  A3  B12  SUM  AVG */
+    if (isalpha((unsigned char)c)) {
+        int start = p->pos;
+        while (p->src[p->pos] && (isalnum((unsigned char)p->src[p->pos]) || p->src[p->pos] == '_'))
+            p->pos++;
+        int len = p->pos - start;
+        if (len >= (int)sizeof(p->cur.ident)) len = sizeof(p->cur.ident) - 1;
+        strncpy(p->cur.ident, p->src + start, len);
+        p->cur.ident[len] = '\0';
+
+        /* Is it a cell ref? Letter(s) followed by digits */
+        int col_chars = 0;
+        while (col_chars < len && isalpha((unsigned char)p->cur.ident[col_chars]))
+            col_chars++;
+        if (col_chars > 0 && col_chars < len &&
+            isdigit((unsigned char)p->cur.ident[col_chars])) {
+            /* Treat as cell: only single-letter column supported for now */
+            p->cur.kind = TOK_CELL;
+            p->cur.cx   = toupper((unsigned char)p->cur.ident[0]) - 'A';
+            p->cur.cy   = atoi(p->cur.ident + col_chars);
+        } else {
+            p->cur.kind = TOK_IDENT;
+            /* upper-case for case-insensitive function names */
+            for (int i = 0; p->cur.ident[i]; i++)
+                p->cur.ident[i] = (char)toupper((unsigned char)p->cur.ident[i]);
+        }
+        return;
+    }
+
+    printf("Unexpected character: '%c'\n", c);
+    p->error = 1;
+    p->cur.kind = TOK_EOF;
+}
+
+static int peek(Parser* p) { return p->cur.kind; }
+static int eat(Parser* p, TokKind k) {
+    if (p->cur.kind != k) {
+        printf("Parse error: unexpected token '%s'\n", p->cur.ident);
+        p->error = 1;
         return 0;
     }
-
-    char* endptr;
-    double val = strtod(s, &endptr);
-    if (endptr != s && (*endptr == '\0' || isspace(*endptr))) {
-        *type = 3;
-        return val;
-    }
-    return 0;
+    next_token(p);
+    return 1;
 }
+
+/* ─── ensure cell exists (expand matrix if needed) ─────────────────────── */
+
+static double read_cell(Parser* p, int cx, int cy) {
+    if (cx < 0 || cy < 0) return 0.0;
+    if (cx >= p->matrix->cols || cy >= p->matrix->rows)
+        cell_create(p->matrix, cx, cy,
+                    p->matrix->cells[cy < p->matrix->rows ? cy : 0]
+                                     [cx < p->matrix->cols ? cx : 0].content,
+                    0);
+    /* expand if still needed */
+    if (cx >= p->matrix->cols || cy >= p->matrix->rows)
+        expand(p->matrix, cy + 1, cx + 1);
+    Cell* cell = &p->matrix->cells[cy][cx];
+    switch (cell->type) {
+        case 1: return (double)cell->content.value;
+        case 2: return (double)cell->content.fvalue;
+        case 3: return cell->content.dvalue;
+        default: return 0.0;
+    }
+}
+
+/* ─── aggregate dispatcher  AGG_FUNC(range, result_cell) ──────────────── */
+
+typedef int (*AggFn)(Cell**, const Cell*, const Cell*, Cell*);
+
+typedef struct { const char* name; AggFn row_fn; AggFn col_fn; } AggEntry;
+
+static const AggEntry AGG_TABLE[] = {
+    {"SUM",     add_row,     add_col    },
+    {"ADD",     add_row,     add_col    },
+    {"AVG",     avg_row,     avg_col    },
+    {"AVERAGE", avg_row,     avg_col    },
+    {"MIN",     min_row,     min_col    },
+    {"MAX",     max_row,     max_col    },
+    {"PRODUCT", product_row, product_col},
+    {"PROD",    product_row, product_col},
+    {"COUNT",   count_row,   count_col  },
+    {"STDEV",   stdev_row,   stdev_col  },
+    {"MEDIAN",  median_row,  median_col },
+};
+#define AGG_TABLE_LEN ((int)(sizeof(AGG_TABLE)/sizeof(AGG_TABLE[0])))
+
+typedef int (*MapFn)(const Cell*, Cell*);
+typedef struct { const char* name; MapFn fn; } MapEntry;
+
+static const MapEntry MAP_TABLE[] = {
+    {"ABS",    abs_cell   },
+    {"DOUBLE", double_cell},
+    {"SQ",     square_cell},
+    {"SQUARE", square_cell},
+    {"CUBE",   cube_cell  },
+    {"LOG",    log_cell   },
+    {"LN",     log_cell   },
+    {"EXP",    exp_cell   },
+    {"SQRT",   sqrt_cell  },
+    {"CEIL",   ceil_cell  },
+    {"FLOOR",  floor_cell },
+    {"NEG",    negate_cell},
+    {"NEGATE", negate_cell},
+    {"INV",    inv_cell   },
+    {"SIN",    sin_cell   },
+    {"COS",    cos_cell   },
+    {"TAN",    tan_cell   },
+};
+#define MAP_TABLE_LEN ((int)(sizeof(MAP_TABLE)/sizeof(MAP_TABLE[0])))
+
+/* Collective map (row/col range) */
+typedef struct {
+    const char* name;
+    AggFn row_fn; AggFn col_fn;
+} CollMapEntry;
+
+static const CollMapEntry COLLMAP_TABLE[] = {
+    {"ABS_RANGE",    abs_row,    abs_col   },
+    {"DOUBLE_RANGE", double_row, double_col},
+    {"SQUARE_RANGE", square_row, square_col},
+    {"CUBE_RANGE",   cube_row,   cube_col  },
+    {"LOG_RANGE",    log_row,    log_col   },
+    {"EXP_RANGE",    exp_row,    exp_col   },
+    {"SQRT_RANGE",   sqrt_row,   sqrt_col  },
+    {"NEG_RANGE",    negate_row, negate_col},
+};
+#define COLLMAP_TABLE_LEN ((int)(sizeof(COLLMAP_TABLE)/sizeof(COLLMAP_TABLE[0])))
+
+/* Forward declaration */
+static double parse_expr(Parser* p);
+
+/* ─── primary ───────────────────────────────────────────────────────────── */
+
+static double parse_primary(Parser* p) {
+    if (p->error) return 0.0;
+
+    /* Parenthesised sub-expression */
+    if (peek(p) == TOK_LPAREN) {
+        next_token(p);
+        double v = parse_expr(p);
+        eat(p, TOK_RPAREN);
+        return v;
+    }
+
+    /* Number literal */
+    if (peek(p) == TOK_NUM) {
+        double v = p->cur.num;
+        next_token(p);
+        return v;
+    }
+
+    /* Cell reference */
+    if (peek(p) == TOK_CELL) {
+        int cx = p->cur.cx, cy = p->cur.cy;
+        next_token(p);
+        return read_cell(p, cx, cy);
+    }
+
+    /* Function call */
+    if (peek(p) == TOK_IDENT) {
+        char fname[32];
+        strncpy(fname, p->cur.ident, sizeof(fname)-1);
+        fname[sizeof(fname)-1] = '\0';
+        next_token(p); /* consume function name */
+
+        if (!eat(p, TOK_LPAREN)) return 0.0;
+
+        /* ── Aggregate functions that take a range or two cells ─── */
+        for (int a = 0; a < AGG_TABLE_LEN; a++) {
+            if (strcmp(fname, AGG_TABLE[a].name) != 0) continue;
+
+            /* First arg must be a cell */
+            if (peek(p) != TOK_CELL) { p->error = 1; return 0.0; }
+            int sx = p->cur.cx, sy = p->cur.cy;
+            next_token(p);
+
+            /* Range  A0:A4 */
+            if (peek(p) == TOK_COLON) {
+                next_token(p);
+                if (peek(p) != TOK_CELL) { p->error = 1; return 0.0; }
+                int ex = p->cur.cx, ey = p->cur.cy;
+                next_token(p);
+                eat(p, TOK_RPAREN);
+
+                /* Ensure cells exist */
+                expand(p->matrix, ey+1, ex+1);
+                expand(p->matrix, sy+1, sx+1);
+                Cell* c1 = &p->matrix->cells[sy][sx];
+                Cell* c2 = &p->matrix->cells[ey][ex];
+
+                /* Temp result cell */
+                Cell tmp = {0};
+                tmp.type = 3;
+                AggFn fn = (sy == ey) ? AGG_TABLE[a].row_fn : AGG_TABLE[a].col_fn;
+                fn(p->matrix->cells, c1, c2, &tmp);
+                return _cell_val(&tmp);
+            }
+
+            /* Two-cell  SUB(A0, B0) */
+            if (peek(p) == TOK_COMMA) {
+                next_token(p);
+                if (peek(p) != TOK_CELL) { p->error = 1; return 0.0; }
+                int ex = p->cur.cx, ey = p->cur.cy;
+                next_token(p);
+                eat(p, TOK_RPAREN);
+
+                expand(p->matrix, sy+1, sx+1);
+                expand(p->matrix, ey+1, ex+1);
+                double v1 = read_cell(p, sx, sy);
+                double v2 = read_cell(p, ex, ey);
+
+                /* We only need sum/avg/min/max etc here.  Build tmp cells. */
+                Cell ca = {.type=3, .content={.dvalue=v1}};
+                Cell cb = {.type=3, .content={.dvalue=v2}};
+                Cell cr = {.type=3, .content={.dvalue=0}};
+                /* For two-cell: row_fn works if row is the same; col_fn otherwise */
+                ca.x = sx; ca.y = sy; cb.x = ex; cb.y = ey;
+                AggFn fn = (sy == ey) ? AGG_TABLE[a].row_fn : AGG_TABLE[a].col_fn;
+                fn(p->matrix->cells, &ca, &cb, &cr);
+                return _cell_val(&cr);
+            }
+
+            eat(p, TOK_RPAREN);
+            return 0.0;
+        }
+
+        /* ── Map functions (single cell or expression) ─── */
+        for (int m = 0; m < MAP_TABLE_LEN; m++) {
+            if (strcmp(fname, MAP_TABLE[m].name) != 0) continue;
+            double arg = parse_expr(p);
+            eat(p, TOK_RPAREN);
+            Cell tmp_in  = {.type=3, .content={.dvalue=arg}};
+            Cell tmp_out = {.type=3, .content={.dvalue=0}};
+            MAP_TABLE[m].fn(&tmp_in, &tmp_out);
+            return tmp_out.content.dvalue;
+        }
+
+        /* ── Collective map  (range → in-place transform) ─── */
+        for (int cm = 0; cm < COLLMAP_TABLE_LEN; cm++) {
+            if (strcmp(fname, COLLMAP_TABLE[cm].name) != 0) continue;
+            if (peek(p) != TOK_CELL) { p->error = 1; return 0.0; }
+            int sx = p->cur.cx, sy = p->cur.cy; next_token(p);
+            eat(p, TOK_COLON);
+            if (peek(p) != TOK_CELL) { p->error = 1; return 0.0; }
+            int ex = p->cur.cx, ey = p->cur.cy; next_token(p);
+            eat(p, TOK_RPAREN);
+            expand(p->matrix, ey+1, ex+1);
+            expand(p->matrix, sy+1, sx+1);
+            Cell* c1 = &p->matrix->cells[sy][sx];
+            Cell* c2 = &p->matrix->cells[ey][ex];
+            AggFn fn = (sy == ey) ? COLLMAP_TABLE[cm].row_fn : COLLMAP_TABLE[cm].col_fn;
+            fn(p->matrix->cells, c1, c2, NULL);
+            return 0.0; /* side-effect only */
+        }
+
+        printf("Unknown function: %s\n", fname);
+        p->error = 1;
+        return 0.0;
+    }
+
+    printf("Parse error: unexpected token kind %d\n", peek(p));
+    p->error = 1;
+    return 0.0;
+}
+
+/* ─── unary ─────────────────────────────────────────────────────────────── */
+
+static double parse_unary(Parser* p) {
+    if (peek(p) == TOK_MINUS) {
+        next_token(p);
+        return -parse_unary(p);
+    }
+    if (peek(p) == TOK_PLUS) {
+        next_token(p);
+        return parse_unary(p);
+    }
+    return parse_primary(p);
+}
+
+/* ─── power  (right-associative) ────────────────────────────────────────── */
+
+static double parse_power(Parser* p) {
+    double base = parse_unary(p);
+    if (peek(p) == TOK_CARET) {
+        next_token(p);
+        double exp = parse_power(p);   /* right-assoc */
+        return pow(base, exp);
+    }
+    return base;
+}
+
+/* ─── term  (*, /) ──────────────────────────────────────────────────────── */
+
+static double parse_term(Parser* p) {
+    double v = parse_power(p);
+    while (!p->error && (peek(p) == TOK_STAR || peek(p) == TOK_SLASH)) {
+        TokKind op = peek(p);
+        next_token(p);
+        double rhs = parse_power(p);
+        if (op == TOK_STAR) {
+            v *= rhs;
+        } else {
+            if (rhs == 0.0) { printf("Division by zero\n"); p->error = 1; return 0.0; }
+            v /= rhs;
+        }
+    }
+    return v;
+}
+
+/* ─── expression  (+, -) ─────────────────────────────────────────────────── */
+
+static double parse_expr(Parser* p) {
+    double v = parse_term(p);
+    while (!p->error && (peek(p) == TOK_PLUS || peek(p) == TOK_MINUS)) {
+        TokKind op = peek(p);
+        next_token(p);
+        double rhs = parse_term(p);
+        v = (op == TOK_PLUS) ? v + rhs : v - rhs;
+    }
+    return v;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Public entry point
+ * ═══════════════════════════════════════════════════════════════════════════ */
 
 void process_command(Matrix* matrix, char* command) {
-    char cmd_copy[256];
-    strncpy(cmd_copy, command, sizeof(cmd_copy)-1);
-    cmd_copy[sizeof(cmd_copy)-1] = '\0';
-    char* target_str = strtok(cmd_copy, "=");
-    char* expr_str = strtok(NULL, "");
-
-    if (!target_str || !expr_str) {
-        printf("Invalid command format. Use TARGET = EXPRESSION\n");
+    /* ── locate '=' separator ── */
+    char* eq = strchr(command, '=');
+    if (!eq) {
+        printf("Invalid command: expected TARGET = EXPRESSION\n");
         return;
     }
 
-    while(isspace(*target_str)) target_str++;
-    char* end_t = target_str + strlen(target_str) - 1;
-    while(end_t > target_str && isspace(*end_t)) *end_t-- = '\0';
+    /* Target cell name */
+    char target_buf[32];
+    int tlen = (int)(eq - command);
+    if (tlen <= 0 || tlen >= (int)sizeof(target_buf)) {
+        printf("Invalid target cell\n"); return;
+    }
+    strncpy(target_buf, command, tlen);
+    target_buf[tlen] = '\0';
+    /* trim */
+    char* t = target_buf;
+    while (isspace((unsigned char)*t)) t++;
+    char* te = t + strlen(t) - 1;
+    while (te > t && isspace((unsigned char)*te)) *te-- = '\0';
 
-    while(isspace(*expr_str)) expr_str++;
-    char* end_e = expr_str + strlen(expr_str) - 1;
-    while(end_e > expr_str && isspace(*end_e)) *end_e-- = '\0';
-
-    int tx, ty;
-    if (parse_cell_name(target_str, &tx, &ty) != 0) {
-        printf("Invalid target cell: %s\n", target_str);
+    /* Parse column letter + row number */
+    if (!isalpha((unsigned char)*t)) {
+        printf("Invalid target cell: %s\n", t);
+        return;
+    }
+    int tx = toupper((unsigned char)t[0]) - 'A';
+    int ty = atoi(t + 1);
+    if (tx < 0 || ty < 0) {
+        printf("Invalid target cell: %s\n", t);
         return;
     }
 
-    // Check for math operators (+, -, *, /)
-    char operators[] = {'+', '-', '*', '/'};
-    char* op_ptr = containsAny(expr_str, strlen(expr_str), operators, 4);
+    /* Expression string (after '=') */
+    const char* expr = eq + 1;
+    while (isspace((unsigned char)*expr)) expr++;
 
-    if (op_ptr) {
-        char operator = *op_ptr;
-        *op_ptr = '\0';
-        char left_str[256];
-        char right_str[256];
-        strncpy(left_str, expr_str, sizeof(left_str)-1);
-        left_str[sizeof(left_str)-1] = '\0';
-        strncpy(right_str, op_ptr + 1, sizeof(right_str)-1);
-        right_str[sizeof(right_str)-1] = '\0';
+    /* ── Run the recursive-descent parser ── */
+    Parser p = {
+        .src    = expr,
+        .pos    = 0,
+        .matrix = matrix,
+        .error  = 0,
+    };
+    next_token(&p);   /* prime the token stream */
+    double result = parse_expr(&p);
 
-        short type1 = 0, type2 = 0;
-        double val1 = get_value(matrix, left_str, &type1);
-        double val2 = get_value(matrix, right_str, &type2);
-        double result = 0;
-
-        switch(operator) {
-            case '+': result = val1 + val2; break;
-            case '-': result = val1 - val2; break;
-            case '*': result = val1 * val2; break;
-            case '/':
-                if (val2 != 0) result = val1 / val2;
-                else { printf("Division by zero\n"); return; }
-                break;
-            default:
-                break;
-        }
-        cell_create(matrix, tx, ty, (CellContent){.dvalue = result}, 3);
+    if (p.error) {
+        printf("Expression evaluation failed.\n");
         return;
     }
 
-    // Check if it's a simple assignment A0 = 5
-    char* endptr;
-    double val = strtod(expr_str, &endptr);
-    if (endptr != expr_str && (*endptr == '\0' || isspace(*endptr))) {
-        cell_create(matrix, tx, ty, (CellContent){.dvalue = val}, 3);
-        return;
-    }
-
-    // Check for functions like ADD(A0:A2)
-    char* expr_copy = strdup(expr_str);
-    char* func_name = strtok(expr_copy, "(");
-    char* args_str = strtok(NULL, ")");
-    if (func_name && args_str) {
-        char* start_cell_str = strtok(args_str, ":");
-        char* end_cell_str = strtok(NULL, "");
-
-        int sx, sy, ex, ey;
-        if (parse_cell_name(start_cell_str, &sx, &sy) == 0) {
-            // Check if it's a range or a single cell
-            if (end_cell_str) {
-                if (parse_cell_name(end_cell_str, &ex, &ey) == 0) {
-                    // Ensure cells exist or expand
-                    cell_create(matrix, sx, sy, matrix->cells[sy][sx].content, matrix->cells[sy][sx].type);
-                    cell_create(matrix, ex, ey, matrix->cells[ey][ex].content, matrix->cells[ey][ex].type);
-                    cell_create(matrix, tx, ty, (CellContent){0}, 3); // result cell
-
-                    if (strcmp(func_name, "ADD") == 0) {
-                        if (sy == ey) {
-                            add_row(matrix->cells, &matrix->cells[sy][sx], &matrix->cells[ey][ex], &matrix->cells[ty][tx]);
-                        } else if (sx == ex) {
-                            add_col(matrix->cells, &matrix->cells[sy][sx], &matrix->cells[ey][ex], &matrix->cells[ty][tx]);
-                        } else {
-                            printf("ADD only supports row or column ranges.\n");
-                        }
-                    } else if (strcmp(func_name, "AVG") == 0) {
-                        if (sy == ey) {
-                            avg_row(matrix->cells, &matrix->cells[sy][sx], &matrix->cells[ey][ex], &matrix->cells[ty][tx]);
-                        } else if (sx == ex) {
-                            avg_col(matrix->cells, &matrix->cells[sy][sx], &matrix->cells[ey][ex], &matrix->cells[ty][tx]);
-                        } else {
-                            printf("AVG only supports row or column ranges.\n");
-                        }
-                    } else {
-                        printf("Range functions only support ADD and AVG for now.\n");
-                    }
-                } else {
-                    printf("Invalid end cell: %s\n", end_cell_str);
-                }
-            } else {
-                // Single cell or comma separated
-                char* args_copy = strdup(args_str); // Use a copy because strtok is already being used on args_str
-                strtok(args_copy, ","); // skip first arg
-                char* next_arg = strtok(NULL, ",");
-                if (next_arg) {
-                    // Two cell operations: SUB(A0, B0)
-                    while(isspace(*next_arg)) next_arg++;
-                    if (parse_cell_name(next_arg, &ex, &ey) == 0) {
-                        cell_create(matrix, sx, sy, matrix->cells[sy][sx].content, matrix->cells[sy][sx].type);
-                        cell_create(matrix, ex, ey, matrix->cells[ey][ex].content, matrix->cells[ey][ex].type);
-                        cell_create(matrix, tx, ty, (CellContent){0}, 3);
-
-                        if (strcmp(func_name, "ADD") == 0) add(&matrix->cells[sy][sx], &matrix->cells[ey][ex], &matrix->cells[ty][tx]);
-                        else if (strcmp(func_name, "SUB") == 0) sub(&matrix->cells[sy][sx], &matrix->cells[ey][ex], &matrix->cells[ty][tx]);
-                        else if (strcmp(func_name, "MUL") == 0) mul(&matrix->cells[sy][sx], &matrix->cells[ey][ex], &matrix->cells[ty][tx]);
-                        else if (strcmp(func_name, "DIV") == 0) divc(&matrix->cells[sy][sx], &matrix->cells[ey][ex], &matrix->cells[ty][tx]);
-                        else printf("Unknown function or incorrect arguments: %s\n", func_name);
-                    }
-                    free(args_copy);
-                } else {
-                    // Single cell copy A1 = B1
-                    cell_create(matrix, sx, sy, matrix->cells[sy][sx].content, matrix->cells[sy][sx].type);
-                    cell_create(matrix, tx, ty, matrix->cells[sy][sx].content, matrix->cells[sy][sx].type);
-                    free(args_copy);
-                }
-            }
-        } else {
-            printf("Invalid start cell: %s\n", start_cell_str);
-        }
-    } else {
-        // Fallback for single cell copy if it didn't look like a function
-        int sx, sy;
-        if (parse_cell_name(expr_str, &sx, &sy) == 0) {
-            cell_create(matrix, sx, sy, matrix->cells[sy][sx].content, matrix->cells[sy][sx].type);
-            cell_create(matrix, tx, ty, matrix->cells[sy][sx].content, matrix->cells[sy][sx].type);
-        } else {
-            printf("Invalid expression: %s\n", expr_str);
-        }
-    }
-    free(expr_copy);
+    /* Ensure target cell exists */
+    expand(matrix, ty + 1, tx + 1);
+    matrix->cells[ty][tx].x    = tx;
+    matrix->cells[ty][tx].y    = ty;
+    matrix->cells[ty][tx].type = 3;
+    matrix->cells[ty][tx].content.dvalue = result;
 }
-
-

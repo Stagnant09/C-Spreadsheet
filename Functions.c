@@ -4,415 +4,391 @@
 #include "Cell.h"
 #include "Functions.h"
 
-int cell_create(Matrix* matrix, const int x, const int y, const CellContent content, const short type) {
-    if (x < 0 || y < 0) {
-        return -1;
+/* ═══════════════════════════════════════════════════════════════════════
+ * Internal helpers
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+/* Promote a cell's value to double regardless of type */
+static inline double cell_to_double(const Cell* c) {
+    switch (c->type) {
+        case 1: return (double)c->content.value;
+        case 2: return (double)c->content.fvalue;
+        case 3: return c->content.dvalue;
+        default: return 0.0;
     }
-    if (x >= matrix->cols || y >= matrix->rows) {
+}
+
+/* Write a double back to a result cell, inheriting the dominant type */
+static inline void double_to_cell(double v, short type, Cell* r) {
+    r->type = (type >= 1 && type <= 3) ? type : 3;
+    switch (r->type) {
+        case 1: r->content.value  = (int)v;    break;
+        case 2: r->content.fvalue = (float)v;  break;
+        case 3: r->content.dvalue = v;          break;
+    }
+}
+
+/* Comparison for qsort (doubles) */
+static int cmp_double(const void* a, const void* b) {
+    double da = *(const double*)a;
+    double db = *(const double*)b;
+    return (da > db) - (da < db);
+}
+
+
+
+/* ═══════════════════════════════════════════════════════════════════════
+ * Build a temporary double[] from a row/col range (heap-allocated)
+ * Caller must free().
+ * ═══════════════════════════════════════════════════════════════════════ */
+static double* range_to_doubles_row(Cell** cells, const Cell* c1,
+                                    const Cell* c2, int* out_n) {
+    if (c1->y != c2->y) { *out_n = 0; return NULL; }
+    int n = c2->x - c1->x + 1;
+    if (n <= 0) { *out_n = 0; return NULL; }
+    double* arr = malloc(n * sizeof(double));
+    int row = c1->y;
+    for (int j = 0; j < n; j++)
+        arr[j] = cell_to_double(&cells[row][c1->x + j]);
+    *out_n = n;
+    return arr;
+}
+
+static double* range_to_doubles_col(Cell** cells, const Cell* c1,
+                                    const Cell* c2, int* out_n) {
+    if (c1->x != c2->x) { *out_n = 0; return NULL; }
+    int n = c2->y - c1->y + 1;
+    if (n <= 0) { *out_n = 0; return NULL; }
+    double* arr = malloc(n * sizeof(double));
+    int col = c1->x;
+    for (int i = 0; i < n; i++)
+        arr[i] = cell_to_double(&cells[c1->y + i][col]);
+    *out_n = n;
+    return arr;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+ * Initialization / memory management
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+int cell_create(Matrix* matrix, int x, int y, CellContent content, short type) {
+    if (x < 0 || y < 0) return -1;
+    if (x >= matrix->cols || y >= matrix->rows)
         expand(matrix, y + 1, x + 1);
-    }
     Cell* cell = &matrix->cells[y][x];
-    cell->x = x;
-    cell->y = y;
-    cell->content = content;
-    cell->type = type;
+    cell->x = x; cell->y = y;
+    cell->content = content; cell->type = type;
     return 0;
 }
 
 int cell_destroy(Matrix* matrix, Cell* cell) {
-    cell->x = 0;
-    cell->y = 0;
-    cell->content.value = 0;
-    cell->type = 0;
+    (void)matrix;
+    cell->x = cell->y = 0;
+    cell->content.value = 0; cell->type = 0;
     return 0;
 }
 
-int cell_set_content(Cell* cell, const CellContent content) {
-    cell->content = content;
-    return 0;
-}
+int cell_set_content(Cell* cell, CellContent content) { cell->content = content; return 0; }
+int cell_get_content(const Cell* cell, CellContent* content) { *content = cell->content; return 0; }
+int cell_set_type(Cell* cell, short type) { cell->type = type; return 0; }
+int cell_get_type(const Cell* cell, short* type) { *type = cell->type; return 0; }
+int set_matrix(Matrix* matrix, Cell** cells) { matrix->cells = cells; return 0; }
+int get_matrix(const Matrix* matrix, Cell** cells) { *cells = *matrix->cells; return 0; }
+int set_rows(Matrix* matrix, int rows) { matrix->rows = rows; return 0; }
+int get_rows(const Matrix* matrix, int* rows) { *rows = matrix->rows; return 0; }
+int set_cols(Matrix* matrix, int cols) { matrix->cols = cols; return 0; }
+int get_cols(const Matrix* matrix, int* cols) { *cols = matrix->cols; return 0; }
 
-int cell_get_content(const Cell* cell, CellContent* content) {
-    *content = cell->content;
-    return 0;
-}
-
-int cell_set_type(Cell* cell, const short type) {
-    cell->type = type;
-    return 0;
-}
-
-int cell_get_type(const Cell* cell, short* type) {
-    *type = cell->type;
-    return 0;
-}
-
-int set_matrix(Matrix* matrix, Cell** cells) {
-    matrix->cells = cells;
-    return 0;
-}
-
-int get_matrix(const Matrix* matrix, Cell** cells) {
-    *cells = *matrix->cells;
-    return 0;
-}
-
-int set_rows(Matrix* matrix, const int rows) {
-    matrix->rows = rows;
-    return 0;
-}
-
-int get_rows(const Matrix* matrix, int* rows) {
-    *rows = matrix->rows;
-    return 0;
-}
-
-int set_cols(Matrix* matrix, const int cols) {
-    matrix->cols = cols;
-    return 0;
-}
-
-int get_cols(const Matrix* matrix, int* cols) {
-    *cols = matrix->cols;
-    return 0;
-}
-
-int init(Matrix *matrix, const int rows, const int cols) {
-    matrix->rows = rows;
-    matrix->cols = cols;
-    matrix->cells = (Cell**)malloc(rows * sizeof(Cell *));
+int init(Matrix* matrix, int rows, int cols) {
+    matrix->rows = rows; matrix->cols = cols;
+    matrix->cells = malloc(rows * sizeof(Cell*));
     for (int i = 0; i < rows; i++) {
-        matrix->cells[i] = (Cell*)malloc(cols * sizeof(Cell));
-        for (int j = 0; j < cols; j++) {
-            matrix->cells[i][j] = (Cell){0, 0, {0}, 0};
-        }
+        matrix->cells[i] = calloc(cols, sizeof(Cell));
     }
     return 0;
 }
 
-int add(const Cell* cell1, const Cell* cell2, Cell* result) {
-    if (cell1->type != cell2->type) {
-        return -1; // Types do not match
-    }
-    CellContent cc;
-    switch (cell1->type) {
-        case 0:
-            return -1; // No type set
-            break;
-        case 1:
-            cc.value = cell1->content.value + cell2->content.value;
-            result->content.value = cc.value;
-            break;
-        case 2:
-            cc.fvalue = cell2->content.fvalue + cell1->content.fvalue;
-            result->content.fvalue = cc.fvalue;
-            break;
-        case 3:
-            cc.dvalue = cell1->content.dvalue + cell2->content.dvalue;
-            result->content.dvalue = cc.dvalue;
-            break;
-        case 4:
-            return -1; // Not implemented
-            break;
-        default:
-            return -1;
-    }
+int matrix_destroy(Matrix* matrix) {
+    for (int i = 0; i < matrix->rows; i++) free(matrix->cells[i]);
+    free(matrix->cells);
+    matrix->cells = NULL;
+    matrix->rows = matrix->cols = 0;
     return 0;
-}
-
-int sub(const Cell* cell1, const Cell* cell2, Cell* result) {
-    if (cell1->type != cell2->type) {
-        return -1;
-    }
-    CellContent cc;
-    switch (cell1->type) {
-        case 0:
-            return -1; // No type set
-            break;
-        case 1:
-            cc.value = cell1->content.value - cell2->content.value;
-            result->content.value = cc.value;
-            break;
-        case 2:
-            cc.fvalue = cell1->content.fvalue - cell2->content.fvalue;
-            result->content.fvalue = cc.fvalue;
-            break;
-        case 3:
-            cc.dvalue = cell1->content.dvalue - cell2->content.dvalue;
-            result->content.dvalue = cc.dvalue;
-            break;
-        case 4:
-            return -1; // Not implemented
-            break;
-        default:
-            return -1;
-    }
-    return 0;
-}
-
-int mul(const Cell* cell1, const Cell* cell2, Cell* result) {
-    if (cell1->type != cell2->type) {
-        return -1;
-    }
-    CellContent cc;
-    switch (cell1->type) {
-        case 0:
-            return -1;
-            break;
-        case 1:
-            cc.value = cell1->content.value * cell2->content.value;
-            result->content.value = cc.value;
-            break;
-        case 2:
-            cc.fvalue = cell1->content.fvalue * cell2->content.fvalue;
-            result->content.fvalue = cc.fvalue;
-            break;
-        case 3:
-            cc.dvalue = cell1->content.dvalue * cell2->content.dvalue;
-            result->content.dvalue = cc.dvalue;
-            break;
-        case 4:
-            return -1;
-            break;
-        default:
-            return -1;
-    }
-    return 0;
-}
-
-int divc(const Cell* cell1, const Cell* cell2, Cell* result) {
-    if (cell1->type != cell2->type) {
-        return -1;
-    }
-    CellContent cc;
-    switch (cell1->type) {
-        case 0:
-            return -1;
-            break;
-        case 1:
-            if (cell2->content.value == 0) return -1;
-            cc.dvalue = (double)cell1->content.value / (double)cell2->content.value;
-            result->content.dvalue = cc.dvalue;
-            result->type = 3;
-            break;
-        case 2:
-            if (cell2->content.fvalue == 0.0f) return -1;
-            cc.fvalue = cell1->content.fvalue / cell2->content.fvalue;
-            result->content.fvalue = cc.fvalue;
-            break;
-        case 3:
-            if (cell2->content.dvalue == 0.0) return -1;
-            cc.dvalue = cell1->content.dvalue / cell2->content.dvalue;
-            result->content.dvalue = cc.dvalue;
-            break;
-        case 4:
-            return -1;
-            break;
-        default:
-            return -1;
-    }
-    return 0;
-}
-
-int mod(const Cell* cell1, const Cell* cell2, Cell* result) {
-    if (cell1->type != cell2->type) {
-        return -1;
-    }
-    CellContent cc;
-    switch (cell1->type) {
-        case 1:
-            if (cell2->content.value == 0) return -1;
-            cc.value = cell1->content.value % cell2->content.value;
-            result->content.value = cc.value;
-            break;
-        default:
-            return -1; // Only integers for modulo
-    }
-    return 0;
-}
-
-
-int powc(const Cell* cell1, const Cell* cell2, Cell* result) {
-    if (cell1->type != cell2->type) {
-        return -1;
-    }
-    CellContent cc;
-    switch (cell1->type) {
-        case 1:
-            cc.value = (int)pow(cell1->content.value, cell2->content.value);
-            result->content.value = cc.value;
-            break;
-        case 2:
-            cc.fvalue = powf(cell1->content.fvalue, cell2->content.fvalue);
-            result->content.fvalue = cc.fvalue;
-            break;
-        case 3:
-            cc.dvalue = pow(cell1->content.dvalue, cell2->content.dvalue);
-            result->content.dvalue = cc.dvalue;
-            break;
-        default:
-            return -1;
-    }
-    return 0;
-}
-
-/**
- * Print a cell in a "(x, y) value" format
- * @param cell The cell to print
- * @return 0 on success, -1 on failure
- */
-int print(const Cell* cell) {
-    switch (cell->type) {
-        case 0:
-            return -1;
-        case 1:
-            printf("(%d, %d) %d", cell->x, cell->y, cell->content.value);
-            break;
-        case 2:
-            printf("(%d, %d) %f", cell->x, cell->y, cell->content.fvalue);
-            break;
-        case 3:
-            printf("(%d, %d) %f", cell->x, cell->y, cell->content.dvalue);
-            break;
-        case 4:
-            printf("(%d, %d) %s", cell->x, cell->y, cell->content.string);
-            break;
-        default:
-            return -1;
-    }
-    return 0;
-}
-
-int add_row(Cell** cells, const Cell* cell1, const Cell* cell2, Cell* result) {
-    cell_set_type(result, cell1->type);
-    cell_set_content(result, (CellContent){0});
-    if (cell1->y != cell2->y) {
-        return -1; // Not the same row
-    }
-    const int row = cell1->y;
-    for (int j = cell1->x; j <= cell2->x; j++) {
-        add(&cells[row][j], result, result);
-    }
-    return 0;
-}
-
-int add_col(Cell** cells, const Cell* cell1, const Cell* cell2, Cell* result) {
-    cell_set_type(result, cell2->type);
-    cell_set_content(result, (CellContent){0});
-    if (cell1->x != cell2->x) {
-        return -1; // Not the same column
-    }
-    const int col = cell1->x;
-    for (int i = cell1->y; i <= cell2->y; i++) {
-        add(&cells[i][col], result, result);
-    }
-    return 0;
-}
-
-int avg_row(Cell** cells, const Cell* cell1, const Cell* cell2, Cell* result) {
-    if (add_row(cells, cell1, cell2, result) != 0) return -1;
-    int count = cell2->x - cell1->x + 1;
-    if (count <= 0) return -1;
-    Cell divisor = *result;
-    switch (result->type) {
-        case 1: divisor.content.value = count; break;
-        case 2: divisor.content.fvalue = (float)count; break;
-        case 3: divisor.content.dvalue = (double)count; break;
-        default: return -1;
-    }
-    return divc(result, &divisor, result);
-}
-
-int avg_col(Cell** cells, const Cell* cell1, const Cell* cell2, Cell* result) {
-    if (add_col(cells, cell1, cell2, result) != 0) return -1;
-    int count = cell2->y - cell1->y + 1;
-    if (count <= 0) return -1;
-    Cell divisor = *result;
-    switch (result->type) {
-        case 1: divisor.content.value = count; break;
-        case 2: divisor.content.fvalue = (float)count; break;
-        case 3: divisor.content.dvalue = (double)count; break;
-        default: return -1;
-    }
-    return divc(result, &divisor, result);
 }
 
 void expand(Matrix* matrix, int rows, int cols) {
-    int new_rows = (rows > matrix->rows) ? rows : matrix->rows;
-    int new_cols = (cols > matrix->cols) ? cols : matrix->cols;
-
-    Cell** new_cells = (Cell**)malloc(new_rows * sizeof(Cell*));
-    for (int i = 0; i < new_rows; i++) {
-        new_cells[i] = (Cell*)malloc(new_cols * sizeof(Cell));
-        for (int j = 0; j < new_cols; j++) {
-            if (i < matrix->rows && j < matrix->cols) {
-                new_cells[i][j] = matrix->cells[i][j];
-            } else {
-                new_cells[i][j] = (Cell){0, 0, {0}, 0};
-            }
+    int nr = (rows > matrix->rows) ? rows : matrix->rows;
+    int nc = (cols > matrix->cols) ? cols : matrix->cols;
+    Cell** nc_arr = malloc(nr * sizeof(Cell*));
+    for (int i = 0; i < nr; i++) {
+        nc_arr[i] = calloc(nc, sizeof(Cell));
+        for (int j = 0; j < nc; j++) {
+            if (i < matrix->rows && j < matrix->cols)
+                nc_arr[i][j] = matrix->cells[i][j];
         }
     }
-
-    for (int i = 0; i < matrix->rows; i++) {
-        free(matrix->cells[i]);
-    }
+    for (int i = 0; i < matrix->rows; i++) free(matrix->cells[i]);
     free(matrix->cells);
+    matrix->cells = nc_arr;
+    matrix->rows = nr; matrix->cols = nc;
+}
 
-    matrix->cells = new_cells;
-    matrix->rows = new_rows;
-    matrix->cols = new_cols;
+ARITH_OP(add, +, +, +)
+ARITH_OP(sub, -, -, -)
+ARITH_OP(mul, *, *, *)
+
+int divc(const Cell* a, const Cell* b, Cell* r) {
+    if (a->type != b->type) return -1;
+    r->type = a->type;
+    switch (a->type) {
+        case 1:
+            if (b->content.value == 0) return -1;
+            r->type = 3;
+            r->content.dvalue = (double)a->content.value / b->content.value;
+            break;
+        case 2:
+            if (b->content.fvalue == 0.0f) return -1;
+            r->content.fvalue = a->content.fvalue / b->content.fvalue;
+            break;
+        case 3:
+            if (b->content.dvalue == 0.0) return -1;
+            r->content.dvalue = a->content.dvalue / b->content.dvalue;
+            break;
+        default: return -1;
+    }
+    return 0;
+}
+
+int mod(const Cell* a, const Cell* b, Cell* r) {
+    if (a->type != 1 || b->type != 1) return -1;
+    if (b->content.value == 0) return -1;
+    r->type = 1;
+    r->content.value = a->content.value % b->content.value;
+    return 0;
+}
+
+int powc(const Cell* a, const Cell* b, Cell* r) {
+    if (a->type != b->type) return -1;
+    r->type = a->type;
+    switch (a->type) {
+        case 1: r->content.value  = (int)pow(a->content.value,  b->content.value);  break;
+        case 2: r->content.fvalue = powf(a->content.fvalue, b->content.fvalue);     break;
+        case 3: r->content.dvalue = pow (a->content.dvalue, b->content.dvalue);     break;
+        default: return -1;
+    }
+    return 0;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+ * I/O
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+int print(const Cell* c) {
+    switch (c->type) {
+        case 1: printf("(%d,%d) %d",  c->x, c->y, c->content.value);  break;
+        case 2: printf("(%d,%d) %f",  c->x, c->y, c->content.fvalue); break;
+        case 3: printf("(%d,%d) %g",  c->x, c->y, c->content.dvalue); break;
+        case 4: printf("(%d,%d) %s",  c->x, c->y, c->content.string); break;
+        default: return -1;
+    }
+    return 0;
 }
 
 int print_matrix(const Matrix* matrix) {
-    if (matrix == NULL || matrix->cells == NULL) {
-        return -1;
-    }
+    if (!matrix || !matrix->cells) return -1;
 
-    // Print top border
-    printf(" ");
-    for (int j = 0; j < matrix->cols; j++) {
-        printf("------------ ");
-    }
-    printf("\n");
+    /* Column header */
+    printf("    ");
+    for (int j = 0; j < matrix->cols; j++)
+        printf("  %-10c", 'A' + j);
+    printf("\n    ");
+    for (int j = 0; j < matrix->cols; j++)
+        printf("+-----------");
+    printf("+\n");
 
     for (int i = 0; i < matrix->rows; i++) {
-        // Print cell content row
-        printf("|");
+        printf("%3d |", i);
         for (int j = 0; j < matrix->cols; j++) {
-            Cell* cell = &matrix->cells[i][j];
-            char buffer[12];
-            buffer[0] = '\0';
-
+            const Cell* cell = &matrix->cells[i][j];
+            char buf[11]; buf[0] = '\0';
             switch (cell->type) {
-                case 1:
-                    snprintf(buffer, sizeof(buffer), "%d", cell->content.value);
-                    break;
-                case 2:
-                    snprintf(buffer, sizeof(buffer), "%.2f", cell->content.fvalue);
-                    break;
-                case 3:
-                    snprintf(buffer, sizeof(buffer), "%.2lf", cell->content.dvalue);
-                    break;
+                case 1: snprintf(buf, sizeof(buf), "%d",    cell->content.value);  break;
+                case 2: snprintf(buf, sizeof(buf), "%.4g",  cell->content.fvalue); break;
+                case 3: snprintf(buf, sizeof(buf), "%.4g",  cell->content.dvalue); break;
                 case 4:
-                    if (cell->content.string) {
-                        snprintf(buffer, sizeof(buffer), "%s", cell->content.string);
-                    }
+                    if (cell->content.string)
+                        snprintf(buf, sizeof(buf), "%s", cell->content.string);
                     break;
-                default:
-                    // Empty cell
-                    break;
+                default: break;
             }
-            printf(" %-10s |", buffer);
+            printf(" %-9s |", buf);
         }
-        printf("\n");
-
-        // Print bottom border for each row
-        printf("|");
-        for (int j = 0; j < matrix->cols; j++) {
-            printf("____________|");
-        }
-        printf("\n");
+        printf("\n    ");
+        for (int j = 0; j < matrix->cols; j++) printf("+-----------");
+        printf("+\n");
     }
-
     return 0;
 }
+
+/* ═══════════════════════════════════════════════════════════════════════
+ * Aggregate functions  (ASM-accelerated where applicable)
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+/* ── ADD ── */
+int add_row(Cell** cells, const Cell* c1, const Cell* c2, Cell* r) {
+    int n; double* arr = range_to_doubles_row(cells, c1, c2, &n);
+    if (!arr) return -1;
+    double s = asm_sum_doubles(arr, n);
+    free(arr);
+    double_to_cell(s, c1->type, r);
+    return 0;
+}
+int add_col(Cell** cells, const Cell* c1, const Cell* c2, Cell* r) {
+    int n; double* arr = range_to_doubles_col(cells, c1, c2, &n);
+    if (!arr) return -1;
+    double s = asm_sum_doubles(arr, n);
+    free(arr);
+    double_to_cell(s, c1->type, r);
+    return 0;
+}
+
+/* ── AVG ── */
+int avg_row(Cell** cells, const Cell* c1, const Cell* c2, Cell* r) {
+    int n; double* arr = range_to_doubles_row(cells, c1, c2, &n);
+    if (!arr || n == 0) return -1;
+    double s = asm_sum_doubles(arr, n); free(arr);
+    double_to_cell(s / n, 3, r); return 0;
+}
+int avg_col(Cell** cells, const Cell* c1, const Cell* c2, Cell* r) {
+    int n; double* arr = range_to_doubles_col(cells, c1, c2, &n);
+    if (!arr || n == 0) return -1;
+    double s = asm_sum_doubles(arr, n); free(arr);
+    double_to_cell(s / n, 3, r); return 0;
+}
+
+AGG_MINMAX(min_row, range_to_doubles_row, arr[0], <)
+AGG_MINMAX(min_col, range_to_doubles_col, arr[0], <)
+AGG_MINMAX(max_row, range_to_doubles_row, arr[0], >)
+AGG_MINMAX(max_col, range_to_doubles_col, arr[0], >)
+
+/* ── PRODUCT (uses ASM) ── */
+int product_row(Cell** cells, const Cell* c1, const Cell* c2, Cell* r) {
+    int n; double* arr = range_to_doubles_row(cells, c1, c2, &n);
+    if (!arr) return -1;
+    double p = asm_product_doubles(arr, n); free(arr);
+    double_to_cell(p, 3, r); return 0;
+}
+int product_col(Cell** cells, const Cell* c1, const Cell* c2, Cell* r) {
+    int n; double* arr = range_to_doubles_col(cells, c1, c2, &n);
+    if (!arr) return -1;
+    double p = asm_product_doubles(arr, n); free(arr);
+    double_to_cell(p, 3, r); return 0;
+}
+
+/* ── COUNT ── */
+int count_row(Cell** cells, const Cell* c1, const Cell* c2, Cell* r) {
+    if (c1->y != c2->y) return -1;
+    int count = 0;
+    for (int j = c1->x; j <= c2->x; j++)
+        if (cells[c1->y][j].type != 0) count++;
+    r->type = 1; r->content.value = count; return 0;
+}
+int count_col(Cell** cells, const Cell* c1, const Cell* c2, Cell* r) {
+    if (c1->x != c2->x) return -1;
+    int count = 0;
+    for (int i = c1->y; i <= c2->y; i++)
+        if (cells[i][c1->x].type != 0) count++;
+    r->type = 1; r->content.value = count; return 0;
+}
+
+/* ── STDEV (sample) ── */
+static int _stdev(double* arr, int n, Cell* r) {
+    if (n < 2) return -1;
+    double sum = asm_sum_doubles(arr, n);
+    double mean = sum / n;
+    double sq = 0.0;
+    for (int i = 0; i < n; i++) { double d = arr[i] - mean; sq += d*d; }
+    double_to_cell(sqrt(sq / (n - 1)), 3, r);
+    return 0;
+}
+int stdev_row(Cell** cells, const Cell* c1, const Cell* c2, Cell* r) {
+    int n; double* arr = range_to_doubles_row(cells, c1, c2, &n);
+    if (!arr) return -1;
+    int rc = _stdev(arr, n, r); free(arr); return rc;
+}
+int stdev_col(Cell** cells, const Cell* c1, const Cell* c2, Cell* r) {
+    int n; double* arr = range_to_doubles_col(cells, c1, c2, &n);
+    if (!arr) return -1;
+    int rc = _stdev(arr, n, r); free(arr); return rc;
+}
+
+/* ── MEDIAN ── */
+static int _median(double* arr, int n, Cell* r) {
+    if (n <= 0) return -1;
+    qsort(arr, n, sizeof(double), cmp_double);
+    double med = (n % 2 == 1) ? arr[n/2]
+                               : (arr[n/2 - 1] + arr[n/2]) / 2.0;
+    double_to_cell(med, 3, r);
+    return 0;
+}
+int median_row(Cell** cells, const Cell* c1, const Cell* c2, Cell* r) {
+    int n; double* arr = range_to_doubles_row(cells, c1, c2, &n);
+    if (!arr) return -1;
+    int rc = _median(arr, n, r); free(arr); return rc;
+}
+int median_col(Cell** cells, const Cell* c1, const Cell* c2, Cell* r) {
+    int n; double* arr = range_to_doubles_col(cells, c1, c2, &n);
+    if (!arr) return -1;
+    int rc = _median(arr, n, r); free(arr); return rc;
+}
+
+MAP1(abs_cell,    abs(c->content.value),
+                  fabsf(c->content.fvalue),
+                  fabs(c->content.dvalue))
+MAP1(double_cell, c->content.value  * 2,
+                  c->content.fvalue * 2.0f,
+                  c->content.dvalue * 2.0)
+MAP1(square_cell, c->content.value  * c->content.value,
+                  c->content.fvalue * c->content.fvalue,
+                  c->content.dvalue * c->content.dvalue)
+MAP1(cube_cell,   c->content.value  * c->content.value  * c->content.value,
+                  c->content.fvalue * c->content.fvalue * c->content.fvalue,
+                  c->content.dvalue * c->content.dvalue * c->content.dvalue)
+MAP1(log_cell,    (int)log((double)c->content.value),
+                  logf(c->content.fvalue),
+                  log(c->content.dvalue))
+MAP1(exp_cell,    (int)exp((double)c->content.value),
+                  expf(c->content.fvalue),
+                  exp(c->content.dvalue))
+MAP1(sqrt_cell,   (int)sqrt((double)c->content.value),
+                  sqrtf(c->content.fvalue),
+                  sqrt(c->content.dvalue))
+MAP1(ceil_cell,   c->content.value,
+                  ceilf(c->content.fvalue),
+                  ceil(c->content.dvalue))
+MAP1(floor_cell,  c->content.value,
+                  floorf(c->content.fvalue),
+                  floor(c->content.dvalue))
+MAP1(negate_cell, -c->content.value,
+                  -c->content.fvalue,
+                  -c->content.dvalue)
+
+int inv_cell(const Cell* c, Cell* r) {
+    double v = cell_to_double(c);
+    if (v == 0.0) { printf("Division by zero in INV\n"); return -1; }
+    double_to_cell(1.0 / v, 3, r);
+    return 0;
+}
+
+TRIG_MAP(sin_cell, sin)
+TRIG_MAP(cos_cell, cos)
+TRIG_MAP(tan_cell, tan)
+
+COLLECTIVE_MAP(abs)
+COLLECTIVE_MAP(double)
+COLLECTIVE_MAP(square)
+COLLECTIVE_MAP(cube)
+COLLECTIVE_MAP(log)
+COLLECTIVE_MAP(exp)
+COLLECTIVE_MAP(sqrt)
+COLLECTIVE_MAP(negate)
